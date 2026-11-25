@@ -1,0 +1,32 @@
+# ============================================================
+# render.yaml ở GỐC repo — cho Render "New → Blueprint".
+# Web service nằm trong thư mục con 06-lab-complete/ (rootDir).
+# Secret dùng generateValue, KHÔNG ghi thẳng giá trị.
+# ============================================================
+services:
+  - type: web
+    name: production-agent
+    runtime: docker
+    rootDir: 06-lab-complete
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: AGENT_API_KEY
+        generateValue: true
+      - key: REDIS_URL
+        sync: false
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "10"
+      - key: DAILY_BUDGET_USD
+        value: "1.0"
+      - key: ENVIRONMENT
+        value: production
+      - key: PORT
+        value: "8000"
+
+  # Redis managed — nếu Render plan free không có Redis, tạo instance thủ công
+  # rồi điền REDIS_URL vào web service (mục Environment).
+  - type: redis
+    name: agent-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru
