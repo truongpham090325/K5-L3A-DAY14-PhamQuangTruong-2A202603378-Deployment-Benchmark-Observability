@@ -90,20 +90,36 @@ docker compose -p k5-day14-observability up -d --build --scale agent=1
 | D | `docker pause` 1 instance | `AgentInstanceDown` | — | Instances up |
 | E | `AGENT_VERSION=v1` | (không có) | — | Retrieval hit ratio / version |
 
+**Đã chạy thật và xác minh (thí nghiệm A + B đồng thời):** đặt `MOCK_ERROR_RATE=0.2` + `MOCK_SLOW_RATE=0.3`, chạy Locust 30 users trong 2,5 phút. Truy vấn `GET http://localhost:9090/api/v1/alerts` thấy **cả 2 alert đang `firing`**:
+
+```text
+alert=AgentHighErrorRate   state=firing  (Error rate /ask vượt 5%)   activeAt=15:58:42Z
+alert=AgentHighLatencyP95  state=firing  (p95 latency /ask vượt 1s)  activeAt=15:58:42Z
+```
+
+`AgentHighErrorRate` (`for: 1m`) fire sau ~1 phút, `AgentHighLatencyP95` (`for: 2m`) fire sau ~2 phút — khớp với cột thời gian.
+
 **Thí nghiệm E không làm alert nào firing. Phát hiện loại sự cố này bằng cách nào?** Đổi `AGENT_VERSION=v1` làm **chất lượng câu trả lời** giảm mạnh, nhưng metric hạ tầng (latency, error rate, cost) vẫn xanh vì agent vẫn "chạy nhanh và không lỗi". Loại sự cố *chất lượng* này chỉ bắt được bằng **eval định kỳ / quality gate trong CI** (golden dataset + `run_eval.py --min-accuracy`), hoặc LLM-as-judge trên traffic thật — không phải bằng alert hạ tầng.
 
 ### 4.3 Debug bằng trace
 
-Chọn 1 trace chậm nhất tìm được:
+Chọn 1 trace chậm nhất tìm được (từ log JSON của agent):
 
-- `trace_id`: `________________`
-- Tổng thời gian: ______ ms
-- Span chiếm nhiều thời gian nhất: ______ (______ ms, ______%)
-- Dòng log tương ứng (grep theo `trace_id`):
+- `trace_id`: `0395c725283a51681d89ced5c6cbf414`
+- Span chậm nhất: `chat mock-llm-small` — **1667.3 ms** (latency LLM, do `MOCK_SLOW_RATE=0.3`)
+- Dòng log tương ứng (grep `llm_call`):
 
 ```json
-{"event": "llm_error", "trace_id": "________________", ...}
+{"ts": "2026-11-25T15:58:50.799071+00:00", "level": "INFO", "service": "observable-agent", "event": "llm_call", "trace_id": "0395c725283a51681d89ced5c6cbf414", "span_id": "169f8e1584b236cb", "model": "mock-llm-small", "agent_version": "v2", "input_tokens": 76, "output_tokens": 39, "cost_usd": 3.5e-05, "llm_ms": 1667.3}
 ```
+
+**Trace lỗi** (tag `error=true`, event `llm_error`):
+
+```json
+{"ts": "2026-11-25T15:58:35.914792+00:00", "level": "INFO", "service": "observable-agent", "event": "llm_error", "trace_id": "09b1e846021b692e227c39d53cc3030d", "span_id": "584aae253c6e7bb7", "request_id": "4e1c44f880ac", "error": "Upstream LLM error: 503 Service Unavailable (mock)"}
+```
+
+Dán `trace_id` vào ô tìm kiếm của Jaeger (`http://localhost:16686`) để xem toàn bộ request.
 
 ---
 
@@ -119,10 +135,12 @@ docker compose -p k5-day14-observability run --rm locust -f /mnt/locust/locustfi
 
 | Số instance | RPS | p50 (ms) | p95 (ms) | p99 (ms) | Failures |
 |---|---|---|---|---|---|
-| 1 | | | | | |
-| 3 | | | | | |
+| 1 | 59.81 | 190 | 230 | 1700 | 73 (1.02%) |
+| 3 | 59.96 | 190 | 230 | 1700 | 68 (0.95%) |
 
-**Giải thích kết quả:** (điền sau khi chạy — nếu scale lên 3 mà p95 gần như không đổi, nút thắt nằm ở **latency LLM** chứ không phải số instance; xem panel LLM latency.)
+(Số liệu từ `benchmark-results/scale_1_stats.csv` và `scale_3_stats.csv`, hàng `POST /ask`, 100 users trong 2 phút.)
+
+**Giải thích kết quả:** Scale 1 → 3 instance **không cải thiện** RPS (59.81 → 59.96) hay p95 (230 → 230) hay p99 (1700 → 1700). Nút thắt nằm ở **latency của LLM** (mock LLM base ~120ms + 3% request "slow" thêm ~1500ms), không phải khả năng xử lý của instance. Mỗi instance là 1 worker async nên đã xử lý được nhiều request song song; thêm instance chỉ giúp khi instance bị **CPU-bound**, còn ở đây request bị chặn bởi thời gian chờ LLM. (Trong lab này LLM là mock, nên tăng instance không đổi p95 — đúng như gợi ý ở panel LLM latency.)
 
 ---
 

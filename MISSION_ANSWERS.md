@@ -72,11 +72,14 @@ docker build -f 02-docker/production/Dockerfile -t my-agent:advanced .
 docker images | grep my-agent
 ```
 
-> ⚠️ **Cần máy có Docker để đo số MB thật.** Kết quả đo (điền sau khi build):
->
-> - Develop (`python:3.11` full): `______ MB`
-> - Production (`python:3.11-slim`, multi-stage): `______ MB`
-> - Chênh lệch: `______%`
+Kết quả đo thật bằng `docker images` (sau khi build từ gốc repo):
+
+| Image | Kích thước |
+|-------|-----------|
+| Develop (`python:3.11` full, single-stage) | **1.67 GB** |
+| Production (`python:3.11-slim`, multi-stage) | **240 MB** |
+
+- Chênh lệch: production **nhỏ hơn ~86%** (chỉ bằng ~14% kích thước bản develop).
 
 **Vì sao multi-stage nhỏ hơn:** stage 1 (builder) chứa toolchain build (gcc, libpq-dev…) để cài dependencies, nhưng stage 2 (runtime) chỉ copy `site-packages` và source → không kéo theo compiler và cache, image cuối nhỏ và ít lỗ hổng hơn. (Số MB trong bài là số mình tự đo bằng `docker images`, không chép từ tài liệu.)
 
@@ -234,7 +237,23 @@ python test_stateless.py
 docker compose -p k5-day14-scaling down
 ```
 
-> ⚠️ **Cần Docker.** Script `test_stateless.py` gửi 5 câu trong cùng session rồi đọc history để kiểm chứng state vẫn còn khi chạy nhiều instance. Kết quả điền sau khi chạy trên máy có Docker.
+Kết quả thật (chạy `docker compose -p k5-day14-scaling up -d --build --scale agent=3` rồi `python test_stateless.py`):
+
+```text
+Session ID: b7f5dd4e-210d-4008-9560-fc85dfa0312c
+
+Request 1: [instance-39c49b]   Request 2: [instance-0a6e0a]   Request 3: [instance-938943]
+Request 4: [instance-39c49b]   Request 5: [instance-0a6e0a]
+Total requests: 5
+Instances used: {'instance-39c49b', 'instance-938943', 'instance-0a6e0a'}
+✅ All requests served despite different instances!
+
+--- Conversation History ---
+Total messages: 10   ← 5 câu hỏi + 5 câu trả lời
+✅ Session history preserved across all instances via Redis!
+```
+
+5 request được 3 instance khác nhau xử lý (round-robin qua Nginx), nhưng **history 10 tin nhắn vẫn đầy đủ** vì state được lưu trong Redis, không nằm trong RAM của từng instance.
 
 ---
 
@@ -242,10 +261,10 @@ docker compose -p k5-day14-scaling down
 
 Đã hoàn thành toàn bộ TODO trong `06-lab-complete/` (config, auth, rate limiter, cost guard, redis client, main, Dockerfile, compose, .dockerignore, .env.example, railway.toml, render.yaml).
 
-### 📋 Checklist Deliverable
+### 📋 Checklist Deliverable (chạy đầy đủ trong WSL2 + Docker — output thật)
 
 ```text
-     ⚠️  Dockerfile (multi-stage, < 500 MB)
+     ✅ Dockerfile (multi-stage, < 500 MB)
      ✅ docker-compose.yml (agent + redis)
      ✅ .dockerignore
      ✅ Health check endpoint (GET /health)
@@ -255,18 +274,17 @@ docker compose -p k5-day14-scaling down
      ✅ Cost guard
      ✅ Config từ environment variables
      ✅ Structured logging
-     ⚠️  Graceful shutdown
+     ✅ Graceful shutdown
      ✅ Public URL ready (Railway / Render config)
-  Result: 10/12 tiêu chí đạt · 38/38 checks passed
+  Result: 12/12 tiêu chí đạt · 43/43 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY!
 ```
 
-**Chi tiết 38/38 checks:** tất cả check tĩnh ✅ và tất cả check runtime ✅ (health→200, ready→200, Redis mất→503, 401/200, 429 sau 5 request, restart vẫn 429 = stateless trong Redis, 402 khi hết budget, log JSON 16 dòng, config từ env).
-
-> Hai tiêu chí còn ⚠️ là do **máy đang không có Docker + là Windows (không gửi được SIGTERM)**:
-> - `Dockerfile (multi-stage, < 500 MB)` — 3 check Docker (build / size / run) chưa chạy.
-> - `Graceful shutdown` — check SIGTERM runtime bị bỏ qua trên Windows; check `docker stop` chưa chạy.
->
-> Code đã viết đúng cả hai tiêu chí này (Dockerfile multi-stage + `exec uvicorn` PID 1 + lifespan); khi chạy `python check_production_ready.py` đầy đủ trên **WSL2/Linux có Docker** sẽ ra `PASS 12/12`.
+**Chi tiết 43/43 checks (đã chạy thật trên Linux + Docker):**
+- Docker: build image thành công (16s), **image = 298 MB** (< 500 MB), container chạy và `GET /health` → 200.
+- `docker stop` tắt êm: **exit code 0 trong 1.0s** (graceful shutdown qua SIGTERM đạt).
+- Runtime (uvicorn `--workers 2`): `/health` 200, `/ready` 200, Redis mất → `/ready` 503 (còn `/health` vẫn 200), thiếu/sai key 401, key đúng 200, vượt giới hạn → 429 (sau 5 request, `RATE_LIMIT_PER_MINUTE=5`), **restart agent vẫn 429** (state nằm trong Redis = stateless), hết budget → 402, log JSON 17 dòng hợp lệ, config đọc từ env.
+- Redis cho bài test stateless được script tự bật bằng container `redis:7-alpine`.
 
 ---
 
